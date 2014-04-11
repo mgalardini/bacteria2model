@@ -1,0 +1,112 @@
+#!/usr/bin/env python
+
+import os
+import logging
+
+from logging import handlers
+
+from Bio import Seq
+from Bio import motifs
+
+from bacteria2model.colorlog import ColorFormatter
+from bacteria2model import __version__
+from bacteria2model.utils import *
+
+__author__ = "Marco Galardini"
+
+def getOptions():
+    import argparse
+
+    # create the top-level parser
+    description = "From RegulonDB dumps to usable pssms"
+    parser = argparse.ArgumentParser(description = description,
+                                    prog = 'buildMotifs')
+    parser.add_argument('regfile', action='store',
+                        help='Regulatory motifs (reg nnnNNNNNNNnnn)')
+
+    parser.add_argument('--working-dir', action='store',
+                        default='.',
+                        dest='wdir',
+                        help='Working directory')
+    parser.add_argument('-v', action='count',
+                        default=0,
+                        help='Increase verbosity level')
+    parser.add_argument('--version', action='version',
+                        version='%(prog)s '+__version__)
+
+    return parser.parse_args()
+    
+if __name__ == "__main__":
+    options = getOptions()
+
+    # Log setup
+    logger = logging.getLogger()
+
+    ch = logging.StreamHandler()
+    if options.v == 0:
+        ch.setLevel(logging.INFO)
+    elif options.v >= 1:
+        ch.setLevel(logging.DEBUG)
+    formatter = ColorFormatter('%(asctime)s - $COLOR%(message)s$RESET','%H:%M:%S')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    logger.setLevel(logging.DEBUG)
+
+    fh = handlers.RotatingFileHandler('buildMotifs.log', maxBytes=2000000)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] - %(message)s',
+                            '%Y-%m-%d %H:%M:%S')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    # Start
+    logging.info('Reading from %s'%options.regfile)
+
+    seqs = {}
+    i = 0
+    for l in open(options.regfile):
+        reg, seq = l.strip().split()
+        
+        # Trim the lowercase letters
+        while True:
+            c = seq[0]
+            if c.islower():
+                seq = seq[1:]
+            else:
+                break
+        while True:
+            c = seq[-1]
+            if c.islower():
+                seq = seq[:-1]
+            else:
+                break
+        
+        if len(seq) == 0:
+            logger.warning('Skipping one empty sequence after-trimming (%s)'%reg)
+            continue
+        
+        i += 1
+
+        seqs[reg] = seqs.get(reg, [])
+        seqs[reg].append(Seq.Seq(seq))
+
+    logger.info('Found %d regulators (%d total sequences)'%(len(seqs), i))
+    
+    logger.info('Saving weblogos and TRANSFAC motifs in %s'%options.wdir)
+    for reg, s in seqs.items():
+        try:
+            m = motifs.create(s)
+        except ValueError as e:
+            logger.warning('Could not create motif for %s'%reg)
+            logger.warning(e)
+            continue
+
+        logger.debug('Weblogo: %s'%os.path.join(options.wdir, '%s.png'%reg))
+        m.weblogo(os.path.join(options.wdir, '%s.png'%reg))
+
+        logger.debug('Transfac: %s'%os.path.join(options.wdir, '%s.transfac'%reg))
+        f = open(os.path.join(options.wdir, '%s.transfac'%reg), 'w')
+        f.write( m.format('transfac') )
+        f.write('\n')
+        f.close()
+

@@ -1,0 +1,210 @@
+#!/usr/bin/env python
+'''
+Perform a motif search on a complete genome, using BioPython
+Motif should be in TRANSFAC format
+'''
+
+__author__ = "Marco Galardini"
+
+from Bio import motifs
+from Bio.Alphabet.IUPAC import unambiguous_dna
+from Bio import SeqIO
+from Bio.SeqUtils import GC
+
+from logging import handlers
+
+import sys
+import os
+import time
+import logging
+
+from bacteria2model.colorlog import ColorFormatter
+from bacteria2model import __version__
+from bacteria2model.multithreading import *
+
+################################################################################
+# Read options
+
+def getOptions():
+    import argparse
+
+    # create the top-level parser
+    description = ("Perform a motif search on a complete genome, using BioPython; "+
+                    "motif should be in TRANSFAC format")
+    parser = argparse.ArgumentParser(description = description,
+                                    prog = 'searchMotif')
+    parser.add_argument('motif', action="store",
+                            help='Motif file (TRANSFAC format)')
+    parser.add_argument('genome', action="store",
+                            help='Genome genbank file')
+    parser.add_argument('output', action="store",
+                            help='Output file')
+    parser.add_argument('-n', metavar='cpu', action="store", dest='cpu',
+                            type=int,
+                            default=1,
+                            help='Number of CPUs to be used')
+
+    parser.add_argument('-v', action='count',
+                        default=0,
+                        help='Increase verbosity level')
+    parser.add_argument('--version', action='version',
+                        version='%(prog)s '+__version__)
+
+    return parser.parse_args()
+
+################################################################################
+# Classes
+
+class SearchMotif(object):
+    def __init__(self, pssm, seq, score_t):
+        self.pssm = pssm
+        self.seq = seq
+        self.score_t = score_t
+    
+    def __call__(self):
+        hits = []
+        
+        self.seq.seq.alphabet = unambiguous_dna
+        self.pssm.alphabet = unambiguous_dna
+        
+        for position, score in self.pssm.search(self.seq.seq, threshold=self.score_t):
+            if position < 0:
+                strand = '-1'
+                start = len(s) + position + 1
+            else:
+                strand = '+1'
+                start = position + 1
+            stop = start + len(m) - 1
+            
+            hits.append('\t'.join([self.seq.id, strand, str(start), str(stop),
+                                str(score), str(self.score_t)]))
+            
+        return hits
+
+class ParallelMotifSearch(CommonMultiProcess):
+    '''
+    Class ParallelMotifSearch
+    '''
+    def __init__(self, pssm, genome, score_t, output,
+                 ncpus=1, queue=Queue()):
+        CommonMultiProcess.__init__(self,ncpus,queue)
+        
+        # Motif
+        self.pssm = pssm
+        
+        # Score threshold
+        self.score_t = score_t
+        
+        # Genome
+        self.genome = genome
+    
+        # Output
+        self.output = open(output, 'w')
+
+    def analyzeMotifs(self):
+        self.initiateParallel()
+        for seq in SeqIO.parse(open(self.genome), 'genbank'):
+            # Multi process
+            obj = SearchMotif(self.pssm, seq, self.score_t)
+            self._paralleltasks.put(obj)
+                
+        # Poison pill to stop the workers
+        self.addPoison()
+        
+        while True:
+            while not self._parallelresults.empty():
+                hits = self._parallelresults.get()
+                
+                for h in hits:
+                    self.output.write(h)
+                    self.output.write('\n')
+                    
+            if self.isTerminated():
+                break
+            
+            self.sleeper.sleep(0.01)
+            
+        while not self._parallelresults.empty():
+            hits = self._parallelresults.get()
+                
+            for h in hits:
+                self.output.write(h)
+                self.output.write('\n')
+        
+        self.output.close()
+
+        self.killParallel()
+    
+    def run(self):
+        self.analyzeMotifs()
+
+################################################################################
+# Main
+
+if __name__ == "__main__":
+    options = getOptions()
+    
+    # Log setup
+    logger = logging.getLogger()
+
+    ch = logging.StreamHandler()
+    if options.v == 0:
+        ch.setLevel(logging.INFO)
+    elif options.v >= 1:
+        ch.setLevel(logging.DEBUG)
+    formatter = ColorFormatter('%(asctime)s - $COLOR%(message)s$RESET','%H:%M:%S')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    logger.setLevel(logging.DEBUG)
+
+    fh = handlers.RotatingFileHandler('searchMotif.log', maxBytes=2000000)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] - %(message)s',
+                            '%Y-%m-%d %H:%M:%S')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    
+    # Start
+    logger.info('Reading motif %s'%options.motif)
+    
+    handle = open(options.motif)
+    record = motifs.parse(handle, "transfac")
+    handle.close()
+    
+    # We assume that we have only one motif for each file
+    m = record[0]
+
+    # Provide the exact background
+    s1 = None
+    for s in SeqIO.parse(open(options.genome), 'genbank'):
+        if s1 is None:
+            s1 = s
+        else:
+            s1 += s
+    m.background = GC(s1.seq)/100
+    
+    # Pseudocounts to avoid overfitting
+    # Threshold as proposed in:
+    # "Pseudocounts for transcription factor binding sites
+    # Keishin Nishida, Martin C. Frith, and Kenta Nakai
+    # doi:  10.1093/nar/gkn1019
+    m.pseudocounts = 0.01
+    
+    # Define our scoere threshold
+    distribution = m.pssm.distribution()
+    #score_t = distribution.threshold_fnr(0.005)
+    score_t = distribution.threshold_patser()
+    
+    pssm = m.pssm
+
+    logger.info('Starting search on %s (with threshold %.2f)'%(options.genome, score_t))
+
+    search = ParallelMotifSearch(pssm, options.genome, score_t,
+                                 options.output, options.cpu)
+    search.start()
+    while True:
+        time.sleep(0.01)
+        
+        if not search.isAlive():
+            break
+
