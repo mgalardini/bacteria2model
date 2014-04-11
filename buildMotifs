@@ -92,7 +92,7 @@ if __name__ == "__main__":
 
     logger.info('Found %d regulators (%d total sequences)'%(len(seqs), i))
     
-    logger.info('Saving weblogos and TRANSFAC motifs in %s'%options.wdir)
+    logger.info('Saving TRANSFAC motifs in %s'%options.wdir)
     for reg, s in seqs.items():
         try:
             m = motifs.create(s)
@@ -101,8 +101,8 @@ if __name__ == "__main__":
             logger.warning(e)
             continue
 
-        logger.debug('Weblogo: %s'%os.path.join(options.wdir, '%s.png'%reg))
-        m.weblogo(os.path.join(options.wdir, '%s.png'%reg))
+        # logger.debug('Weblogo: %s'%os.path.join(options.wdir, '%s.png'%reg))
+        # m.weblogo(os.path.join(options.wdir, '%s.png'%reg))
 
         logger.debug('Transfac: %s'%os.path.join(options.wdir, '%s.transfac'%reg))
         f = open(os.path.join(options.wdir, '%s.transfac'%reg), 'w')
